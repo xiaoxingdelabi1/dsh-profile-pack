@@ -11,16 +11,25 @@
 
 ## 用法
 
-### 1. 添加插件列表
-
-把 `cordis.patch.yml` 的内容追加到你自己的 `~/.dsh/profiles/web/cordis.patch.yml` 里。
-
-### 2. 安装插件
+### 方式一：安装脚本（新装）
 
 ```powershell
-# 运行安装脚本，自动下载所有插件
+# 下载安装脚本
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/xiaoxingdelabi1/dsh-profile-pack/main/install.ps1" -OutFile install.ps1
+
+# 运行
 .\install.ps1
 ```
+
+### 方式二：斜杠命令（已有 check-update 插件）
+
+如果你已经装了 `dsh-command-check-update` 插件，直接在聊天框里输入：
+
+```
+/install-pack
+```
+
+插件会自动从 GitHub 下载所有插件并更新 cordis.patch.yml。
 
 ### 3. 重启 DSH
 
