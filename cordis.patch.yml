@@ -1,0 +1,7 @@
+# Paste this block into your ~/.dsh/profiles/web/cordis.patch.yml
+# (or create the file if it doesn't exist)
+- insert:
+    - id: retry-count
+      name: '@deepseek-ai/dsh-command-retry-count'
+    - id: check-update
+      name: '@deepseek-ai/dsh-command-check-update'
