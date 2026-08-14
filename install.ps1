@@ -3,113 +3,120 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$nodeModules = Join-Path $ProfileDir "..\node_modules"
 $plugins = @(
-    @{ Name = "dsh-command-retry-count"; Repo = "xiaoxingdelabi1/dsh-command-retry-count" },
-    @{ Name = "dsh-command-check-update"; Repo = "xiaoxingdelabi1/dsh-command-check-update" }
+    @{ Name = "dsh-command-retry-count";   Id = "retry-count";   Repo = "xiaoxingdelabi1/dsh-command-retry-count" },
+    @{ Name = "dsh-command-check-update";  Id = "check-update";  Repo = "xiaoxingdelabi1/dsh-command-check-update" }
 )
 
 Write-Host "DSH Profile Pack Installer" -ForegroundColor Cyan
 Write-Host "=========================" -ForegroundColor Cyan
 Write-Host ""
 
-# Check if profile directory exists
-if (-not (Test-Path $ProfileDir)) {
-    Write-Host "Creating profile directory: $ProfileDir" -ForegroundColor Yellow
-    New-Item -ItemType Directory -Path $ProfileDir -Force | Out-Null
+# ── 1. Locate the dsh install ──────────────────────────────────────────────
+# The npm registry returns 404 for these plugins (they are GitHub-only), so
+# cordis.patch.yml references them by file:// URL, NOT by package name.
+# For the plugins' bare imports (@deepseek-ai/dsh-llm, @deepseek-ai/dsh-settings)
+# and check-update's hard-coded ../../../@deepseek-ai/dsh/package.json lookup
+# to resolve, they must live inside the dsh package's own dependency tree:
+#   <npm-root>/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/
+function Get-DshInstallDir {
+    $npmRoot = npm root -g 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($npmRoot)) {
+        throw "npm is not available. Install Node.js/npm first."
+    }
+    $candidate = Join-Path $npmRoot "@deepseek-ai\dsh"
+    if (Test-Path (Join-Path $candidate "package.json")) {
+        return $candidate
+    }
+    throw "dsh not found at: $candidate`nRun 'npm i -g @deepseek-ai/dsh' first, then re-run this script."
 }
 
-# Ensure node_modules/@deepseek-ai exists
-$targetDir = Join-Path $nodeModules "@deepseek-ai"
-if (-not (Test-Path $targetDir)) {
-    Write-Host "Creating node_modules directory: $targetDir" -ForegroundColor Yellow
-    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
-}
+$dshDir = Get-DshInstallDir
+$targetBase = Join-Path $dshDir "node_modules\@deepseek-ai"
+Write-Host "dsh install dir: $dshDir" -ForegroundColor Gray
+Write-Host "plugin target  : $targetBase" -ForegroundColor Gray
 
-# Download and install each plugin
+# ── 2. Download & install each plugin ──────────────────────────────────────
 foreach ($plugin in $plugins) {
     $pluginName = $plugin.Name
     $repo = $plugin.Repo
-    $dest = Join-Path $targetDir $pluginName
+    $dest = Join-Path $targetBase $pluginName
 
-    Write-Host "Installing: $pluginName" -ForegroundColor Green
+    Write-Host "`nInstalling: $pluginName" -ForegroundColor Green
     Write-Host "  From: github.com/$repo" -ForegroundColor Gray
 
-    # Download from GitHub using the API
-    $apiUrl = "https://api.github.com/repos/$repo/contents"
-
-    # Get the file list from the repo
+    # Download the repo tarball (public repo, no token needed)
+    $tmp = Join-Path $env:TEMP ("dsh_pack_" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $zip = Join-Path $tmp "src.zip"
     try {
-        $files = @(
-            "package.json",
-            "LICENSE",
-            "README.md",
-            "README.zh.md",
-            "lib/index.js",
-            "lib/types/index.d.ts"
-        )
+        Invoke-WebRequest -Uri "https://github.com/$repo/archive/refs/heads/main.zip" -OutFile $zip -UseBasicParsing
+        Expand-Archive -Path $zip -DestinationPath $tmp -Force
+        $srcDir = Get-ChildItem $tmp -Directory | Select-Object -First 1
+        if (-not $srcDir) { throw "empty archive" }
 
-        # Create target directory
-        New-Item -ItemType Directory -Path "$dest\lib\types" -Force | Out-Null
-
-        # Download each file
-        foreach ($file in $files) {
-            $fileUrl = "$apiUrl/$($file -replace '\\', '/')"
-            Write-Host "  Downloading: $file" -ForegroundColor Gray
-            try {
-                $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction SilentlyContinue
-                if ($response.StatusCode -eq 200) {
-                    $data = $response.Content | ConvertFrom-Json
-                    if ($data.content) {
-                        $bytes = [Convert]::FromBase64String($data.content)
-                        $outPath = Join-Path $dest $file
-                        $outDir = Split-Path $outPath -Parent
-                        if (-not (Test-Path $outDir)) {
-                            New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-                        }
-                        [System.IO.File]::WriteAllBytes($outPath, $bytes)
-                    }
-                }
-            }
-            catch {
-                Write-Host "  [SKIP] $file not found" -ForegroundColor DarkYellow
-            }
-        }
-        Write-Host "  Done!" -ForegroundColor Green
+        # Remove any stale install, then copy the plugin package in
+        if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+        New-Item -ItemType Directory -Path $dest -Force | Out-Null
+        Copy-Item (Join-Path $srcDir.FullName "*") $dest -Recurse -Force
     }
     catch {
-        Write-Host "  [ERROR] Failed to download $pluginName" -ForegroundColor Red
+        Write-Host "  [ERROR] Failed to download $pluginName : $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
     }
-    Write-Host ""
+    finally {
+        if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+    }
+
+    # Sanity check
+    if (-not (Test-Path (Join-Path $dest "lib\index.js"))) {
+        Write-Host "  [ERROR] $pluginName has no lib/index.js; layout changed?" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  Done!" -ForegroundColor Green
 }
 
-# Check if cordis.patch.yml exists
-$patchFile = Join-Path $ProfileDir "cordis.patch.yml"
-if (Test-Path $patchFile) {
-    Write-Host "cordis.patch.yml already exists at: $patchFile" -ForegroundColor Yellow
-    Write-Host "Make sure it contains the plugin entries from profile-pack/cordis.patch.yml" -ForegroundColor Yellow
-}
-else {
-    Write-Host "Creating cordis.patch.yml..." -ForegroundColor Yellow
-    @"
-# Your patch layer for this dsh profile, applied after every bundle layer:
-# a top-level YAML array of loader patch entries (id-targeted config
-# overrides, disables, and insert lists; `!!js` expressions allowed).
-- insert:
-    - id: retry-count
-      name: '@deepseek-ai/dsh-command-retry-count'
-    - id: check-update
-      name: '@deepseek-ai/dsh-command-check-update'
-"@ | Set-Content -Path $patchFile -Encoding Utf8
-    Write-Host "Created: $patchFile" -ForegroundColor Green
+# ── 3. Write cordis.patch.yml with file:// URLs ────────────────────────────
+# Package-name entries would crash dsh web (npm registry 404), and bare
+# Windows paths fail the ESM loader ("Received protocol 'c:'"). file:// URLs
+# are the only form the profile loader passes through unchanged.
+if (-not (Test-Path $ProfileDir)) {
+    Write-Host "`nCreating profile directory: $ProfileDir" -ForegroundColor Yellow
+    New-Item -ItemType Directory -Path $ProfileDir -Force | Out-Null
 }
 
-Write-Host "=========================" -ForegroundColor Cyan
+$lines = @(
+    "# Your patch layer for this dsh profile, applied after every bundle layer:",
+    "# a top-level YAML array of loader patch entries (id-targeted config",
+    "# overrides, disables, and insert lists; `!!js` expressions allowed).",
+    "#",
+    "# Generated by dsh-profile-pack install.ps1. Plugins are referenced by",
+    "# file:// URL because they are NOT published on the npm registry; package",
+    "# names would 404 and crash dsh web at startup.",
+    "- insert:"
+)
+foreach ($plugin in $plugins) {
+    $idx = Join-Path $targetBase "$($plugin.Name)\lib\index.js"
+    $url = "file:///" + ($idx -replace '\\', '/')
+    $lines += "    - id: $($plugin.Id)"
+    $lines += "      name: '$url'"
+}
+$patchContent = $lines -join "`r`n"
+$patchPath = Join-Path $ProfileDir "cordis.patch.yml"
+if (Test-Path $patchPath) {
+    Copy-Item $patchPath "$patchPath.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    Write-Host "`nBacked up existing cordis.patch.yml" -ForegroundColor Yellow
+}
+Set-Content -Path $patchPath -Value $patchContent -Encoding Utf8
+
+Write-Host "`n=========================" -ForegroundColor Cyan
 Write-Host "Installation complete!" -ForegroundColor Cyan
-Write-Host "Restart DSH to load the new plugins." -ForegroundColor Cyan
+Write-Host "Restart dsh web to load the plugins." -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Available commands after restart:" -ForegroundColor White
 Write-Host "  /version                      - Show current DSH version" -ForegroundColor Gray
 Write-Host "  /check-update                 - Check for updates" -ForegroundColor Gray
 Write-Host "  /check-update to <version>    - Upgrade to a specific version" -ForegroundColor Gray
 Write-Host "  /retry-count <provider> <n>   - Set retry count (0-20)" -ForegroundColor Gray
+Write-Host ""
+Write-Host "NOTE: If you upgrade/reinstall dsh, re-run this script to restore the plugins."
